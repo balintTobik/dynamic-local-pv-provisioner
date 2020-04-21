@@ -43,7 +43,7 @@ func NewPvcHandler(storagePath string, cfg *rest.Config) (*PvcHandler, error) {
 		storagePath: storagePath,
 		k8sClient:   kubeClient,
 	}
-	return &pvcHandler, nil
+	return &pvcHandler, err
 }
 
 func (pvcHandler *PvcHandler) CreateController() cache.Controller {
@@ -61,28 +61,18 @@ func (pvcHandler *PvcHandler) CreateController() cache.Controller {
 	return controller
 }
 
+
 func (pvcHandler *PvcHandler) pvcAdded(pvc v1.PersistentVolumeClaim) {
-	log.Printf("DEBUG: PVC Added: %+v\n", pvc)
 	handlePvc, pvDirPath := shouldPvcBeHandled(v1.PersistentVolumeClaim{}, pvc, pvcHandler.nodeName, pvcHandler.storagePath)
-	if !handlePvc {
-		log.Println("DEBUG: pvcAdded - Not my job...")
-		return
-	}
-	if !pvcHandler.enoughLvCapacity(pvc) {
+	if !handlePvc || !pvcHandler.enoughLvCapacity(pvc) {
 		return
 	}
 	pvcHandler.createPVStorage(pvc, pvDirPath)
 }
 
 func (pvcHandler *PvcHandler) pvcChanged(oldPvc v1.PersistentVolumeClaim, newPvc v1.PersistentVolumeClaim) {
-	log.Printf("PVC changed: %+v\n", newPvc)
 	handlePvc, pvDirPath := shouldPvcBeHandled(oldPvc, newPvc, pvcHandler.nodeName, pvcHandler.storagePath)
-	if !handlePvc {
-		log.Println("DEBUG: pvcChanged - Not my job...")
-		return
-	}
-	if !pvcHandler.enoughLvCapacity(newPvc) {
-		log.Println("ERROR: Not enough storage!")
+	if !handlePvc || !pvcHandler.enoughLvCapacity(newPvc) {
 		return
 	}
 	pvcHandler.createPVStorage(newPvc, pvDirPath)
@@ -103,17 +93,15 @@ func (pvcHandler *PvcHandler) enoughLvCapacity(pvc v1.PersistentVolumeClaim) boo
 }
 
 func shouldPvcBeHandled(oldPvc v1.PersistentVolumeClaim, newPvc v1.PersistentVolumeClaim, nodeName string, storagePath string) (bool, string) {
-	if newPvc.Status.Phase == v1.ClaimPending {
-		if pvcNodeName, ok := newPvc.ObjectMeta.Annotations[k8sclient.NodeName]; ok && (pvcNodeName == nodeName) {
-			if isChangeEnoughToProceed(oldPvc, newPvc) {
-				pvDir := storagePath + "/" + newPvc.ObjectMeta.Namespace + "_" + newPvc.ObjectMeta.Name + "-" + generateRandomSuffix(8)
+// pvcStorageClaim := newPvc.Spec.StorageClassName
+	if newPvc.ObjectMeta.Annotations[k8sclient.LocalAnnotation] == k8sclient.LocalScProvisioner && (newPvc.Status.Phase == v1.ClaimPending) {
+		if isChangeEnoughToProceed(oldPvc, newPvc) {
+			if pvcNodeName, ok := newPvc.ObjectMeta.Annotations[k8sclient.NodeName]; ok && (pvcNodeName == nodeName) {
+				pvDir := storagePath + newPvc.ObjectMeta.Namespace + "_" + newPvc.ObjectMeta.Name + "-" + generateRandomSuffix(8)
 				if _, err := os.Stat(pvDir); os.IsNotExist(err) {
 					return true, pvDir
 				}
-				log.Println("DEBUG: " + pvDir + " already exists!")
 			}
-		} else {
-			log.Printf("DEBUG: Nodename: %t, %s, env: %s\n", ok, pvcNodeName, nodeName)
 		}
 	}
 	return false, ""
@@ -122,17 +110,12 @@ func shouldPvcBeHandled(oldPvc v1.PersistentVolumeClaim, newPvc v1.PersistentVol
 func (pvcHandler *PvcHandler) createPVStorage(pvc v1.PersistentVolumeClaim, pvDirPath string) {
 	var projID int = 1
 
-	log.Println("DEBUG: Starting createPVStorage executor...")
 	pvcStorageReq, ok := pvc.Spec.Resources.Requests["storage"]
 	if !ok {
 		log.Println("ERROR: Storage request is empty!")
 		return
 	}
-	log.Printf("DEBUG: storage resource = %v\n", pvcStorageReq)
-	log.Printf("DEBUG: storage resource value = %v\n", (&pvcStorageReq).Value())
 	storageRequest := strconv.FormatInt((&pvcStorageReq).Value(), 10)
-	log.Println("DEBUG: storageRequest: " + storageRequest)
-
 	projectsContent, err := ioutil.ReadFile("/etc/projects")
 	if err != nil {
 		log.Println("ERROR: Cannot read /etc/projects file: " + err.Error())
@@ -182,24 +165,18 @@ func (pvcHandler *PvcHandler) createPVStorage(pvc v1.PersistentVolumeClaim, pvDi
 	// set xfs_quota limit
 	subcommand := fmt.Sprintf("project -s %s", projName)
 	command := exec.Command("xfs_quota", "-x", "-c", subcommand, pvcHandler.storagePath)
-	output, err := command.CombinedOutput()
+	_, err = command.CombinedOutput()
 	if err != nil {
 		log.Println("ERROR: Cannot set xfs_quota project, because: " + err.Error())
 		return
 	}
-	log.Printf("DEBUG: command: %+v\n", command)
-	log.Println("DEBUG: output: " + string(output))
-
 	subcommand = fmt.Sprintf("limit -p bhard=%s %s", storageRequest, projName)
 	command = exec.Command("xfs_quota", "-x", "-c", subcommand, pvcHandler.storagePath)
-	output, err = command.CombinedOutput()
+	_, err = command.CombinedOutput()
 	if err != nil {
 		log.Println("ERROR: Cannot set xfs_quota limit, because: " + err.Error())
 		return
 	}
-	log.Printf("DEBUG: command: %+v\n", command)
-	log.Println("DEBUG: output: " + string(output))
-	log.Println("DEBUG: Bind Mount... ")
 	// Bind mounting
 	err = syscall.Mount(pvDirPath, pvDirPath, "none", syscall.MS_BIND, "")
 	if err != nil {
@@ -219,7 +196,6 @@ func (pvcHandler *PvcHandler) createPVStorage(pvc v1.PersistentVolumeClaim, pvDi
 		log.Println("ERROR: Cannot modify fstab file: " + fstabPath + " because: " + err.Error() + "\nCannot save mountpoint!")
 		return
 	}
-	log.Println("DEBUG: createPVStorage executor successful!")
 }
 
 func generateRandomSuffix(suffixlength int) string {

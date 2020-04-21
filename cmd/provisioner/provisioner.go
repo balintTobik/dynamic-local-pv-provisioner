@@ -21,7 +21,6 @@ import (
 
 var (
 	kubeConfig 	string
-	// storagePath string
 )
 
 type Provisoner struct {
@@ -41,6 +40,7 @@ func main() {
 	provisioner := Provisoner{
 		k8sClient: client,
 	}
+
 	kubeInformerFactory := informers.NewSharedInformerFactory(provisioner.k8sClient, time.Second*10)
 	provisonerController := kubeInformerFactory.Core().V1().PersistentVolumeClaims().Informer()
 	provisonerController.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -66,22 +66,16 @@ func main() {
 }
 
 func (provisioner *Provisoner) pvcAdded(pvc v1.PersistentVolumeClaim) {
-	log.Printf("DEBUG: PROVISIONER PVC Added: %+v\n", pvc)
 	_, nodeNameOk := pvc.ObjectMeta.Annotations[k8sclient.NodeName]
-	if !nodeNameOk && (pvc.Status.Phase != v1.ClaimBound) {
+	if pvc.ObjectMeta.Annotations[k8sclient.LocalAnnotation] == k8sclient.LocalScProvisioner && !nodeNameOk && (pvc.Status.Phase == v1.ClaimPending) {
 		provisioner.handlePvc(pvc)
-	} else {
-		log.Println("DEBUG: PROVISIONER pvcAdded - Not my job...")
 	}
 }
 
 func (provisioner *Provisoner) pvcChanged(oldPvc v1.PersistentVolumeClaim, newPvc v1.PersistentVolumeClaim) {
-	log.Printf("DEBUG: PROVISIONER PVC Added: %+v\n", newPvc)
 	_, nodeNameOk := newPvc.ObjectMeta.Annotations[k8sclient.NodeName]
-	if !nodeNameOk && (newPvc.Status.Phase != v1.ClaimBound) {
+	if newPvc.ObjectMeta.Annotations[k8sclient.LocalAnnotation] == k8sclient.LocalScProvisioner && !nodeNameOk && (newPvc.Status.Phase == v1.ClaimPending) {
 		provisioner.handlePvc(newPvc)
-	} else {
-		log.Println("DEBUG: PROVISIONER pvcAdded - Not my job...")
 	}
 }
 
@@ -101,13 +95,11 @@ func (provisioner *Provisoner) handlePvc (pvc v1.PersistentVolumeClaim) {
 		s = append(s, key + "=" + value)
 	}
 	selector := strings.Join(s,",")
-	log.Println("DEBUG: Selector: " + selector)
 	node, err := k8sclient.GetNodeByLabel(selector, provisioner.k8sClient)
 	if err != nil {
 		log.Println("ERROR: Cannot query node by label, because: " + err.Error())
 		return
 	}
-	log.Printf("DEBUG: Choosen node: %+v\n", node)
 	if pvc.ObjectMeta.Annotations == nil {
 		pvc.ObjectMeta.Annotations = make(map[string]string)
 	}

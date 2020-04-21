@@ -18,6 +18,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+const (
+	localVolumeAnnotation = "pv.kubernetes.io/provisioned-by"
+)
+
 type PvHandler struct {
 	nodeName    string
 	storagePath string
@@ -25,7 +29,6 @@ type PvHandler struct {
 }
 
 func NewPvHandler(storagePath string, cfg *rest.Config) (*PvHandler, error) {
-	log.Println("DEBUG: NewPvHandler start...")
 	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -36,14 +39,11 @@ func NewPvHandler(storagePath string, cfg *rest.Config) (*PvHandler, error) {
 		storagePath: storagePath,
 		k8sClient:   kubeClient,
 	}
-	log.Println("DEBUG: pvHandler setted")
 	lvCap, err := lvmAvailableCapacity(storagePath)
 	if err != nil{
 		return nil, err
 	}
-	log.Printf("DEBUG: lvmCap determined, lvcap: %d", lvCap)
 	err = createLVCapacityResource(nodeName, lvCap, kubeClient)
-	log.Println("DEBUG: after patch")
 	return &pvHandler, err
 }
 
@@ -59,9 +59,7 @@ func (pvHandler *PvHandler) CreateController() cache.Controller {
 }
 
 func (pvHandler *PvHandler) pvAdded(pv v1.PersistentVolume) {
-	log.Printf("PV Added: %+v\n", pv)
 	if !pvHandler.handlePv(pv) {
-		log.Println("DEBUG: PV Added - Not my job...")
 		return
 	}
 	err := pvHandler.decreaseStorageCap(pv)
@@ -69,13 +67,10 @@ func (pvHandler *PvHandler) pvAdded(pv v1.PersistentVolume) {
 		log.Println("ERROR: PV Added failed: " + err.Error())
 		return
 	}
-	log.Println("DEBUG: PV Added successfull ")
 }
 
 func (pvHandler *PvHandler) pvDeleted(pv v1.PersistentVolume) {
-	log.Printf("DEBUG: PV Deleted: %+v\n", pv)
 	if !pvHandler.handlePv(pv) {
-		log.Println("DEBUG: PV Deleted - Not my job...")
 		return
 	}
 	err := pvHandler.increaseStorageCap(pv)
@@ -83,16 +78,15 @@ func (pvHandler *PvHandler) pvDeleted(pv v1.PersistentVolume) {
 		log.Println("ERROR: PV Delete failed: " + err.Error())
 		return
 	}
-	log.Println("DEBUG: PV Delete successfull")
 }
 
 func (pvHandler *PvHandler) handlePv(pv v1.PersistentVolume) bool {
-	nodeSelector := pv.Spec.NodeAffinity.Required.String()
-	if strings.Contains(nodeSelector, pvHandler.nodeName) {
-		log.Println("DEBUG: handle PV")
-		return true
+	if strings.Contains(pv.ObjectMeta.Annotations[localVolumeAnnotation], "local-volume-provisioner") {
+		nodeSelector := pv.Spec.NodeAffinity.Required.String()
+		if strings.Contains(nodeSelector, pvHandler.nodeName) {
+			return true
+		}
 	}
-	log.Println("DEBUG: nodeselector: " + nodeSelector)
 	return false
 }
 
@@ -118,7 +112,6 @@ func (pvHandler *PvHandler) decreaseStorageCap(pv v1.PersistentVolume) error{
 	if err != nil{
 		return errors.New("Cannot get node(" + pvHandler.nodeName + "), because: " + err.Error())
 	}
-	log.Printf("DEBUG: dec pv-capacity: %+v\n", pvCapacity)
 	nodeCap := node.Status.Capacity[k8sclient.LvCapacity]
 	(&nodeCap).Sub(pvCapacity)
 	node.Status.Capacity[k8sclient.LvCapacity] = nodeCap
@@ -149,6 +142,5 @@ func lvmAvailableCapacity (lvPath string) (int64, error) {
 	if err != nil {
 		return 0, errors.New("Cannot get FS info from: " + lvPath + " because: " + err.Error())
 	}
-	log.Printf("DEBUG: Availabe blocks: %d , int64: %d , Block size: %d",fs.Bavail, int64(fs.Bavail), fs.Bsize)
 	return int64(fs.Bavail) * fs.Bsize, nil
 }
