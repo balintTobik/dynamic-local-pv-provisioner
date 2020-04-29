@@ -2,11 +2,15 @@ package handlers
 
 import (
 	"os"
+	"os/exec"
+	"io/ioutil"
+	"fmt"
 	"log"
 	"time"
 	"reflect"
 	"errors"
 	"strings"
+	"path/filepath"
 	syscall "golang.org/x/sys/unix"
 	"github.com/nokia/dynamic-local-pv-provisioner/pkg/k8sclient"
 
@@ -64,7 +68,7 @@ func (pvHandler *PvHandler) pvAdded(pv v1.PersistentVolume) {
 	}
 	err := pvHandler.decreaseStorageCap(pv)
 	if err != nil{
-		log.Println("ERROR: PV Added failed: " + err.Error())
+		log.Println("PvHandler ERROR: PV Added failed: " + err.Error())
 		return
 	}
 }
@@ -73,15 +77,94 @@ func (pvHandler *PvHandler) pvDeleted(pv v1.PersistentVolume) {
 	if !pvHandler.handlePv(pv) {
 		return
 	}
-	err := pvHandler.increaseStorageCap(pv)
+	if pv.Spec.PersistentVolumeReclaimPolicy != v1.PersistentVolumeReclaimDelete{
+		return
+	}
+	localVolumePath := pv.Spec.Local.Path
+	// unmount pv directory
+	err := syscall.Unmount(localVolumePath, 0)
+	if err != nil {
+		log.Println("PvHandler ERROR: Cannot UNMOUNT directory (" + localVolumePath + "), because: " + err.Error())
+		return
+	}
+	// delete xfs_quota data
+	subcommand := fmt.Sprintf("limit -p bsoft=0 bhard=0 %s", filepath.Base(localVolumePath))
+	command := exec.Command("xfs_quota", "-x", "-c", subcommand, pvHandler.storagePath)
+	_, err = command.CombinedOutput()
+	if err != nil {
+		log.Println("PvHandler ERROR: Cannot set xfs_quota project, because: " + err.Error())
+		return
+	}
+	subcommand = fmt.Sprintf("project -C %s", filepath.Base(localVolumePath))
+	command = exec.Command("xfs_quota", "-x", "-c", subcommand, pvHandler.storagePath)
+	_, err = command.CombinedOutput()
+	if err != nil {
+		log.Println("PvHandler ERROR: Cannot set xfs_quota project, because: " + err.Error())
+		return
+	}
+	//remove data from projects file
+	err = removePvDataFromFile("/etc/projects", filepath.Base(localVolumePath))
+	if err != nil {
+		log.Println("PvHandler ERROR: " + err.Error())
+		return
+	}
+	//remove data from projid file
+	err = removePvDataFromFile("/etc/projid", filepath.Base(localVolumePath))
+	if err != nil {
+		log.Println("PvHandler ERROR: " + err.Error())
+		return
+	}
+	//remove data from fstab file
+	err = removePvDataFromFile(fstabPath, localVolumePath)
+	if err != nil {
+		log.Println("PvHandler ERROR: " + err.Error())
+		return
+	}
+	// delete directory
+	err = os.RemoveAll(localVolumePath)
+	if err != nil {
+		log.Println("PvHandler ERROR: Cannot delete " + localVolumePath + " , because: " + err.Error())
+	}
+	//delete pvc dunno it is needed
+
+	// increate storage capacity
+	err = pvHandler.increaseStorageCap(pv)
 	if err != nil{
-		log.Println("ERROR: PV Delete failed: " + err.Error())
+		log.Println("PvHandler ERROR: PV Delete failed: " + err.Error())
 		return
 	}
 }
 
+func removePvDataFromFile(filePath string, searchData string) error {
+	var removedList []string
+	fileContent, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return errors.New("Cannot read "+ filePath +" file: " + err.Error())
+	}
+	fileContentList := strings.Split(string(fileContent), "\n")
+	removeIdx := 0
+	for idx, data := range fileContentList {
+			if strings.Contains(data, searchData){
+				removeIdx = idx
+			}
+	}
+	removedList = append(removedList, fileContentList[:removeIdx]...)
+	removedList = append(removedList, fileContentList[removeIdx+1:]...)
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return errors.New("Cannot open" + filePath + " file, because: " + err.Error())
+	}
+	defer file.Close()
+	_, err = file.WriteString(strings.Join(removedList, "\n"))
+	if err != nil {
+		return errors.New("Cannot modify" + filePath + " file, because: " + err.Error())
+	}
+	return nil
+}
+
 func (pvHandler *PvHandler) handlePv(pv v1.PersistentVolume) bool {
-	if strings.Contains(pv.ObjectMeta.Annotations[localVolumeAnnotation], "local-volume-provisioner") {
+	pvIsLocal, err := k8sclient.StorageClassIsNokiaLocal(pv.Spec.StorageClassName, pvHandler.k8sClient)
+	if err == nil && pvIsLocal {
 		nodeSelector := pv.Spec.NodeAffinity.Required.String()
 		if strings.Contains(nodeSelector, pvHandler.nodeName) {
 			return true

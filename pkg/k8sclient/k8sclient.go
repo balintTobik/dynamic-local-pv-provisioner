@@ -36,13 +36,16 @@ func GetNodeByLabel(label string, kubeClient kubernetes.Interface) (v1.Node, err
 		for _, node := range nodeList.Items {
 			nodeCapacity, ok := node.Status.Capacity[LvCapacity]
 			if !ok {
-				return returnNode, errors.New("No lv-capacity set, yet!")
+				continue
 			}
 			if (&nodeCapacity).CmpInt64(maxCapacity) == 1 {
 				maxCapacity = (&nodeCapacity).Value()
 				returnNode = node
 			}
 		}
+	}
+	if returnNode.ObjectMeta.Name == "" {
+		return v1.Node{}, errors.New("No lv-capacity set, yet!")
 	}
 	return returnNode, nil
 }
@@ -69,4 +72,12 @@ func UpdateNodeStatus(nodeName string, kubeClient kubernetes.Interface, node *v1
 		return err
 	}
 	return nil
+}
+
+func StorageClassIsNokiaLocal(storageClassName string, kubeClient kubernetes.Interface) (bool, error){
+	storageClass, err := kubeClient.StorageV1().StorageClasses().Get(context.TODO(), storageClassName, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	return storageClass.Provisioner == LocalScProvisioner, nil
 }
