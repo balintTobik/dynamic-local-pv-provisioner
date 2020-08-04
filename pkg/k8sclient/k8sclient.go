@@ -7,6 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -15,6 +16,8 @@ const (
 	LvCapacity = "nokia.k8s.io/lv-capacity"
 	LocalScProvisioner = "nokia.k8s.io/local"
 	LocalAnnotation = "volume.beta.kubernetes.io/storage-provisioner"
+	HostnameLabel = "kubernetes.io/hostname"
+	PatchHostname = "kubernetes.io~1hostname"
 )
 
 func GetNodeByLabel(label string, kubeClient kubernetes.Interface) (v1.Node, error) {
@@ -80,4 +83,13 @@ func StorageClassIsNokiaLocal(storageClassName string, kubeClient kubernetes.Int
 		return false, err
 	}
 	return storageClass.Provisioner == LocalScProvisioner, nil
+}
+
+func GetVolume(pvName string, kubeClient kubernetes.Interface) (*v1.PersistentVolume, error){
+	return kubeClient.CoreV1().PersistentVolumes().Get(context.TODO(), pvName, metav1.GetOptions{})
+}
+
+func PatchPvc(pvcName string, nameSpace string, jsonData []byte, kubeClient kubernetes.Interface) (*v1.PersistentVolumeClaim, error){
+	result, err := kubeClient.CoreV1().PersistentVolumeClaims(nameSpace).Patch(context.TODO(), pvcName, types.JSONPatchType, jsonData, metav1.PatchOptions{})
+	return result, err
 }

@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/signal"
 	syscall "golang.org/x/sys/unix"
-
+	"k8s.io/klog"
 	"github.com/nokia/dynamic-local-pv-provisioner/pkg/handlers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
@@ -27,6 +27,7 @@ type Executor struct{
 }
 
 func main() {
+	klog.InitFlags(nil)
 	flag.Parse()
 	executor := Executor{
 		Controllers: make(map[string]cache.Controller),

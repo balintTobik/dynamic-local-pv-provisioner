@@ -9,8 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"encoding/json"
-	"io/ioutil"
-	"github.com/go-yaml/yaml"
 	syscall "golang.org/x/sys/unix"
 	"github.com/nokia/dynamic-local-pv-provisioner/pkg/k8sclient"
 
@@ -22,11 +20,7 @@ import (
 )
 
 var (
-	kubeConfig string
-	defaultSelectorFilePath = "/etc/config/config.yml"
-	parseDefaultSelector map[string] struct {
-		DefaultNodeSelector string `yaml:"defaultNodeSelector"`
-	}
+	kubeConfig 	string
 )
 
 type Provisoner struct {
@@ -35,10 +29,6 @@ type Provisoner struct {
 
 func main() {
 	flag.Parse()
-	if err := ParseDefaultNodeSelector(); err != nil {
-		log.Println("INFO: Cannot parse default nodeselector, because: " + err.Error() + ", continue without it!")
-	}
-
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeConfig)
 	if err != nil {
 		log.Fatal("ERROR: Parsing kubeconfig failed with error: " + err.Error() + ", exiting!")
@@ -101,19 +91,8 @@ func (provisioner *Provisoner) handlePvc (pvc v1.PersistentVolumeClaim) {
 		}
 	}
 	s := []string{}
-	if len(nodeSelectorMap) > 0 {
-		for key, value := range nodeSelectorMap {
-			s = append(s, key + "=" + value)
-		}
-	} else {
-
-		if scDefaultSelector, ok := parseDefaultSelector[*pvc.Spec.StorageClassName]; ok {
-			for _, selector := range(strings.Split(scDefaultSelector.DefaultNodeSelector, ",")) {
-				key := strings.Trim(strings.Split(selector,":")[0], "\"{}")
-				value := strings.Trim(strings.Split(selector,":")[1], "\"{}")
-				s = append(s, key + "=" + value)
-			}
-	  }
+	for key, value := range nodeSelectorMap {
+		s = append(s, key + "=" + value)
 	}
 	selector := strings.Join(s,",")
 	node, err := k8sclient.GetNodeByLabel(selector, provisioner.k8sClient)
@@ -133,21 +112,7 @@ func (provisioner *Provisoner) handlePvc (pvc v1.PersistentVolumeClaim) {
 	}
 }
 
-func ParseDefaultNodeSelector() error {
-	file, err := ioutil.ReadFile(defaultSelectorFilePath)
-	if err != nil {
-		return err
-	}
-	err = yaml.Unmarshal([]byte(file), &parseDefaultSelector)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func init() {
 	// flag.StringVar(&storagePath, "storagepath", "", "The path where VG is mounted and where sig-storage-controller is watching. Mandatory parameter.")
 	flag.StringVar(&kubeConfig, "kubeconfig", "", "Path to a kubeconfig. Optional parameter, only required if out-of-cluster.")
-	// flag.StringVar(&defaultSelectorFilePath, "defaultSelectorFilePath", "", "Path to a default node selector Yaml path. Optional parameter, only required if default node selector is required.")
-
 }
