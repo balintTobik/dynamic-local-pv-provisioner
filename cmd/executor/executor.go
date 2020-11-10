@@ -5,29 +5,28 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	syscall "golang.org/x/sys/unix"
-	"k8s.io/klog"
+
 	"github.com/nokia/dynamic-local-pv-provisioner/pkg/handlers"
+	syscall "golang.org/x/sys/unix"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const(
-	PvcController 	= "pvcHandler"
-	PvController 		= "pvHandler"
+const (
+	PvcController = "pvcHandler"
+	PvController  = "pvHandler"
 )
 
 var (
-	kubeConfig 	string
+	kubeConfig  string
 	storagePath string
 )
 
-type Executor struct{
-	Controllers  map[string]cache.Controller
+type Executor struct {
+	Controllers map[string]cache.Controller
 }
 
 func main() {
-	klog.InitFlags(nil)
 	flag.Parse()
 	executor := Executor{
 		Controllers: make(map[string]cache.Controller),
@@ -36,7 +35,7 @@ func main() {
 	if err != nil {
 		log.Fatal("ERROR: Parsing kubeconfig failed with error: " + err.Error() + ", exiting!")
 	}
-  pvcHandler, err := handlers.NewPvcHandler(storagePath, cfg)
+	pvcHandler, err := handlers.NewPvcHandler(storagePath, cfg)
 	if err != nil {
 		log.Fatal("ERROR: Could not initalize K8s client for PvcHandler because of error: " + err.Error() + ", exiting!")
 	}

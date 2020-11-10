@@ -1,25 +1,21 @@
 package handlers
 
 import (
-	"os"
-	"log"
-	"time"
-	"reflect"
 	"errors"
+	"log"
+	"os"
+	"reflect"
 	"strings"
-	syscall "golang.org/x/sys/unix"
+	"time"
+
 	"github.com/nokia/dynamic-local-pv-provisioner/pkg/k8sclient"
-	"k8s.io/klog"
-	"k8s.io/api/core/v1"
+	syscall "golang.org/x/sys/unix"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/rest"
-	"k8s.io/apimachinery/pkg/api/resource"
-)
-
-const (
-	localVolumeAnnotation = "pv.kubernetes.io/provisioned-by"
+	"k8s.io/client-go/tools/cache"
 )
 
 type PvHandler struct {
@@ -40,7 +36,7 @@ func NewPvHandler(storagePath string, cfg *rest.Config) (*PvHandler, error) {
 		k8sClient:   kubeClient,
 	}
 	lvCap, err := lvmAvailableCapacity(storagePath)
-	if err != nil{
+	if err != nil {
 		return nil, err
 	}
 	err = createLVCapacityResource(nodeName, lvCap, kubeClient)
@@ -63,7 +59,7 @@ func (pvHandler *PvHandler) pvAdded(pv v1.PersistentVolume) {
 		return
 	}
 	err := pvHandler.decreaseStorageCap(pv)
-	if err != nil{
+	if err != nil {
 		log.Println("PvHandler ERROR: PV Added failed: " + err.Error())
 		return
 	}
@@ -73,27 +69,25 @@ func (pvHandler *PvHandler) pvDeleted(pv v1.PersistentVolume) {
 	if !pvHandler.handlePv(pv) {
 		return
 	}
-	if pv.Spec.PersistentVolumeReclaimPolicy != v1.PersistentVolumeReclaimDelete{
+	if pv.Spec.PersistentVolumeReclaimPolicy != v1.PersistentVolumeReclaimDelete {
 		return
 	}
 	localVolumePath := pv.Spec.Local.Path
-	klog.Infof("DEBUG: Delete pv: %s",pv.ObjectMeta.Name)
 	// delete directory
 	err := os.RemoveAll(localVolumePath)
 	if err != nil {
 		log.Println("PvHandler ERROR: Cannot delete " + localVolumePath + " , because: " + err.Error())
 	}
-	klog.Infof("DEBUG: delete directory, pv:%s",pv.ObjectMeta.Name)
 
 	err = pvHandler.increaseStorageCap(pv)
-	if err != nil{
+	if err != nil {
 		log.Println("PvHandler ERROR: PV Delete failed: " + err.Error())
 		return
 	}
 }
 
 func (pvHandler *PvHandler) handlePv(pv v1.PersistentVolume) bool {
-	pvIsLocal, err := k8sclient.StorageClassIsNokiaLocal(pv.Spec.StorageClassName, pvHandler.k8sClient)
+	pvIsLocal, err := k8sclient.StorageClassIsNokiaLocal(pv.Spec.StorageClassName)
 	if err == nil && pvIsLocal {
 		nodeSelector := pv.Spec.NodeAffinity.Required.String()
 		if strings.Contains(nodeSelector, pvHandler.nodeName) {
@@ -103,53 +97,53 @@ func (pvHandler *PvHandler) handlePv(pv v1.PersistentVolume) bool {
 	return false
 }
 
-func (pvHandler *PvHandler) increaseStorageCap(pv v1.PersistentVolume) error{
+func (pvHandler *PvHandler) increaseStorageCap(pv v1.PersistentVolume) error {
 	pvCapacity := pv.Spec.Capacity["storage"]
-	node, err := k8sclient.GetNode(pvHandler.nodeName, pvHandler.k8sClient)
-	if err != nil{
+	node, err := k8sclient.GetNode(pvHandler.nodeName)
+	if err != nil {
 		return errors.New("Cannot get node(" + pvHandler.nodeName + "), because: " + err.Error())
 	}
 	nodeCap := node.Status.Capacity[k8sclient.LvCapacity]
 	(&nodeCap).Add(pvCapacity)
 	node.Status.Capacity[k8sclient.LvCapacity] = nodeCap
-	err = k8sclient.UpdateNodeStatus(pvHandler.nodeName, pvHandler.k8sClient, node)
-	if err != nil{
+	err = k8sclient.UpdateNodeStatus(pvHandler.nodeName, node)
+	if err != nil {
 		return errors.New("Cannot update node(" + pvHandler.nodeName + "), because: " + err.Error())
 	}
 	return nil
 }
 
-func (pvHandler *PvHandler) decreaseStorageCap(pv v1.PersistentVolume) error{
+func (pvHandler *PvHandler) decreaseStorageCap(pv v1.PersistentVolume) error {
 	pvCapacity := pv.Spec.Capacity["storage"]
-	node, err := k8sclient.GetNode(pvHandler.nodeName, pvHandler.k8sClient)
-	if err != nil{
+	node, err := k8sclient.GetNode(pvHandler.nodeName)
+	if err != nil {
 		return errors.New("Cannot get node(" + pvHandler.nodeName + "), because: " + err.Error())
 	}
 	nodeCap := node.Status.Capacity[k8sclient.LvCapacity]
 	(&nodeCap).Sub(pvCapacity)
 	node.Status.Capacity[k8sclient.LvCapacity] = nodeCap
-	err = k8sclient.UpdateNodeStatus(pvHandler.nodeName, pvHandler.k8sClient, node)
-	if err != nil{
+	err = k8sclient.UpdateNodeStatus(pvHandler.nodeName, node)
+	if err != nil {
 		return errors.New("Cannot update node(" + pvHandler.nodeName + "), because: " + err.Error())
 	}
 	return nil
 }
 
 func createLVCapacityResource(nodeName string, lvCapacity int64, kubeClient kubernetes.Interface) error {
-	node, err := k8sclient.GetNode(nodeName, kubeClient)
-	if err != nil{
+	node, err := k8sclient.GetNode(nodeName)
+	if err != nil {
 		return errors.New("Cannot get node(" + nodeName + "), because: " + err.Error())
 	}
 	lvCapQuantity := resource.NewQuantity(lvCapacity, resource.BinarySI)
 	node.Status.Capacity[k8sclient.LvCapacity] = *lvCapQuantity
-	err = k8sclient.UpdateNodeStatus(nodeName, kubeClient, node)
-	if err != nil{
+	err = k8sclient.UpdateNodeStatus(nodeName, node)
+	if err != nil {
 		return errors.New("Cannot update node(" + nodeName + "), because: " + err.Error())
 	}
 	return nil
 }
 
-func lvmAvailableCapacity (lvPath string) (int64, error) {
+func lvmAvailableCapacity(lvPath string) (int64, error) {
 	fs := syscall.Statfs_t{}
 	err := syscall.Statfs(lvPath, &fs)
 	if err != nil {

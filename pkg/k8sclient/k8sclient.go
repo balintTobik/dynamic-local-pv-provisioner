@@ -1,32 +1,57 @@
 package k8sclient
 
 import (
-	"errors"
 	"context"
+	"errors"
 
+	"github.com/sbabiv/roundrobin"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 )
 
 const (
-	NodeSelector = "nokia.k8s.io/nodeSelector"
-	NodeName = "nokia.k8s.io/nodeName"
-	LvCapacity = "nokia.k8s.io/lv-capacity"
+	LvCapacity         = "nokia.k8s.io/lv-capacity"
 	LocalScProvisioner = "nokia.k8s.io/local"
-	LocalAnnotation = "volume.beta.kubernetes.io/storage-provisioner"
-	HostnameLabel = "kubernetes.io/hostname"
-	PatchHostname = "kubernetes.io~1hostname"
+	NodeName           = "nokia.k8s.io/nodeName"
+	RR                 = "round robin"
+	Cap                = "capacity"
 )
 
-func GetNodeByLabel(label string, kubeClient kubernetes.Interface) (v1.Node, error) {
-	var returnNode v1.Node
-	var maxCapacity int64 = 0
-	var listOption metav1.ListOptions
+func getClientSet() (kubernetes.Interface, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, errors.New("Error creating InCluster config: " + err.Error())
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, errors.New("Error creating clientset: " + err.Error())
+	}
+	return clientset, nil
+}
 
+func GetAllNodes() (v1.NodeList, error) {
+	clientSet, err := getClientSet()
+	if err != nil {
+		return v1.NodeList{}, err
+	}
+	nodes, err := clientSet.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	return *nodes, err
+}
+
+func GetNodeByLabel(label string, selectorMethod string, rr *roundrobin.Balancer) (v1.Node, error) {
+	var (
+		returnNode  v1.Node
+		maxCapacity int64 = 0
+		listOption  metav1.ListOptions
+	)
+	clientSet, err := getClientSet()
+	if err != nil {
+		return v1.Node{}, err
+	}
 	listOption = metav1.ListOptions{LabelSelector: label}
-	nodeList, err := kubeClient.CoreV1().Nodes().List(context.TODO(), listOption)
+	nodeList, err := clientSet.CoreV1().Nodes().List(context.TODO(), listOption)
 	if err != nil {
 		return v1.Node{}, err
 	}
@@ -36,14 +61,19 @@ func GetNodeByLabel(label string, kubeClient kubernetes.Interface) (v1.Node, err
 	case 1:
 		return nodeList.Items[0], nil
 	default:
-		for _, node := range nodeList.Items {
-			nodeCapacity, ok := node.Status.Capacity[LvCapacity]
-			if !ok {
-				continue
-			}
-			if (&nodeCapacity).CmpInt64(maxCapacity) == 1 {
-				maxCapacity = (&nodeCapacity).Value()
-				returnNode = node
+		if selectorMethod == RR {
+			nodeId, _ := rr.Pick()
+			returnNode = nodeList.Items[nodeId.(int)%len(nodeList.Items)]
+		} else if selectorMethod == Cap {
+			for _, node := range nodeList.Items {
+				nodeCapacity, ok := node.Status.Capacity[LvCapacity]
+				if !ok {
+					continue
+				}
+				if (&nodeCapacity).CmpInt64(maxCapacity) == 1 {
+					maxCapacity = (&nodeCapacity).Value()
+					returnNode = node
+				}
 			}
 		}
 	}
@@ -53,43 +83,47 @@ func GetNodeByLabel(label string, kubeClient kubernetes.Interface) (v1.Node, err
 	return returnNode, nil
 }
 
-func UpdatePvc(pvc v1.PersistentVolumeClaim, kubeClient kubernetes.Interface) error {
-	_, err := kubeClient.CoreV1().PersistentVolumeClaims(pvc.ObjectMeta.Namespace).Update(context.TODO(), &pvc, metav1.UpdateOptions{})
+func UpdateNodeStatus(nodeName string, node *v1.Node) error {
+	clientSet, err := getClientSet()
+	if err != nil {
+		return err
+	}
+	_, err = clientSet.CoreV1().Nodes().UpdateStatus(context.TODO(), node, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func GetNode(nodeName string, kubeClient kubernetes.Interface) (*v1.Node, error) {
-	node, err := kubeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
- 	if err != nil {
-		return nil, err
-	}
-	return node, nil
-}
-
-func UpdateNodeStatus(nodeName string, kubeClient kubernetes.Interface, node *v1.Node) error {
-	_, err := kubeClient.CoreV1().Nodes().UpdateStatus(context.TODO(), node, metav1.UpdateOptions{})
+func StorageClassIsNokiaLocal(storageClassName string) (bool, error) {
+	clientSet, err := getClientSet()
 	if err != nil {
-		return err
+		return false, err
 	}
-	return nil
-}
 
-func StorageClassIsNokiaLocal(storageClassName string, kubeClient kubernetes.Interface) (bool, error){
-	storageClass, err := kubeClient.StorageV1().StorageClasses().Get(context.TODO(), storageClassName, metav1.GetOptions{})
+	storageClass, err := clientSet.StorageV1().StorageClasses().Get(context.TODO(), storageClassName, metav1.GetOptions{})
 	if err != nil {
 		return false, err
 	}
 	return storageClass.Provisioner == LocalScProvisioner, nil
 }
 
-func GetVolume(pvName string, kubeClient kubernetes.Interface) (*v1.PersistentVolume, error){
-	return kubeClient.CoreV1().PersistentVolumes().Get(context.TODO(), pvName, metav1.GetOptions{})
+func GetNode(nodeName string) (*v1.Node, error) {
+	clientSet, err := getClientSet()
+	if err != nil {
+		return nil, err
+	}
+	node, err := clientSet.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return node, nil
 }
 
-func PatchPvc(pvcName string, nameSpace string, jsonData []byte, kubeClient kubernetes.Interface) (*v1.PersistentVolumeClaim, error){
-	result, err := kubeClient.CoreV1().PersistentVolumeClaims(nameSpace).Patch(context.TODO(), pvcName, types.JSONPatchType, jsonData, metav1.PatchOptions{})
-	return result, err
+func GetVolume(pvName string) (*v1.PersistentVolume, error) {
+	clientSet, err := getClientSet()
+	if err != nil {
+		return nil, err
+	}
+	return clientSet.CoreV1().PersistentVolumes().Get(context.TODO(), pvName, metav1.GetOptions{})
 }

@@ -1,26 +1,22 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
-	"errors"
 	"time"
-	"hash/fnv"
-	"k8s.io/klog"
-	"encoding/json"
 
 	"github.com/nokia/dynamic-local-pv-provisioner/pkg/k8sclient"
 
 	syscall "golang.org/x/sys/unix"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -28,19 +24,14 @@ import (
 )
 
 const (
-	fstabPath = "/rootfs/fstab"
+	fstabPath           = "/rootfs/fstab"
+	pvDirNameAnnotation = "nokia.k8s.io/pvDirName"
 )
 
 type PvcHandler struct {
 	nodeName    string
 	storagePath string
 	k8sClient   kubernetes.Interface
-}
-
-type patch struct {
-	Op    string          `json:"op"`
-	Path  string          `json:"path"`
-	Value json.RawMessage `json:"value"`
 }
 
 func NewPvcHandler(storagePath string, cfg *rest.Config) (*PvcHandler, error) {
@@ -63,14 +54,15 @@ func (pvcHandler *PvcHandler) CreateController() cache.Controller {
 		AddFunc: func(obj interface{}) {
 			pvcHandler.pvcAdded(*(reflect.ValueOf(obj).Interface().(*v1.PersistentVolumeClaim)))
 		},
-		DeleteFunc: func(obj interface{}) {pvcHandler.pvcDeleted(*(reflect.ValueOf(obj).Interface().(*v1.PersistentVolumeClaim)))},
+		DeleteFunc: func(obj interface{}) {
+			pvcHandler.pvcDeleted(*(reflect.ValueOf(obj).Interface().(*v1.PersistentVolumeClaim)))
+		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			pvcHandler.pvcChanged(*(reflect.ValueOf(oldObj).Interface().(*v1.PersistentVolumeClaim)), *(reflect.ValueOf(newObj).Interface().(*v1.PersistentVolumeClaim)))
 		},
 	})
 	return controller
 }
-
 
 func (pvcHandler *PvcHandler) pvcAdded(pvc v1.PersistentVolumeClaim) {
 	handlePvc, pvDirPath := shouldPvcBeHandled(v1.PersistentVolumeClaim{}, pvc, pvcHandler.nodeName, pvcHandler.storagePath)
@@ -89,17 +81,18 @@ func (pvcHandler *PvcHandler) pvcChanged(oldPvc v1.PersistentVolumeClaim, newPvc
 }
 
 func (pvcHandler *PvcHandler) pvcDeleted(pvc v1.PersistentVolumeClaim) {
-	if handlePvc, _ := shouldPvcBeHandled(v1.PersistentVolumeClaim{}, pvc, pvcHandler.nodeName, pvcHandler.storagePath); handlePvc {
-		pv, err := k8sclient.GetVolume(pvc.Spec.VolumeName, pvcHandler.k8sClient)
+	if handlePvc := shouldDeletePvcBeHandled(pvc, pvcHandler.nodeName); handlePvc {
+		pv, err := k8sclient.GetVolume(pvc.Spec.VolumeName)
 		if err != nil {
-			log.Println("PvcHandler ERROR: Cannot get pv "+ pvc.Spec.VolumeName +", because: " + err.Error())
+			log.Println("PvcHandler ERROR: Cannot get pv " + pvc.Spec.VolumeName + ", because: " + err.Error())
+			return
 		}
 		deletePVStorage(*pv, pvcHandler.storagePath)
 	}
 }
 
 func (pvcHandler *PvcHandler) enoughLvCapacity(pvc v1.PersistentVolumeClaim) bool {
-	node, err := k8sclient.GetNode(pvcHandler.nodeName, pvcHandler.k8sClient)
+	node, err := k8sclient.GetNode(pvcHandler.nodeName)
 	if err != nil {
 		log.Println("PvcHandler ERROR: Cannot get node: " + pvcHandler.nodeName + ", because: " + err.Error())
 		return false
@@ -113,25 +106,33 @@ func (pvcHandler *PvcHandler) enoughLvCapacity(pvc v1.PersistentVolumeClaim) boo
 }
 
 func shouldPvcBeHandled(oldPvc v1.PersistentVolumeClaim, newPvc v1.PersistentVolumeClaim, nodeName string, storagePath string) (bool, string) {
-	if newPvc.Annotations[k8sclient.LocalAnnotation] == k8sclient.LocalScProvisioner && isChangeEnoughToProceed(oldPvc, newPvc) {
-		klog.Infof("DEBUG: pvc-name: %s nodeName: %s , pvcNodeName: %s", newPvc.ObjectMeta.Name, nodeName, newPvc.ObjectMeta.Annotations[k8sclient.NodeName])
+	pvcIsLocal, _ := k8sclient.StorageClassIsNokiaLocal(*(newPvc.Spec.StorageClassName))
+	if pvcIsLocal && isChangeEnoughToProceed(oldPvc, newPvc) {
 		if pvcNodeName, ok := newPvc.ObjectMeta.Annotations[k8sclient.NodeName]; ok && pvcNodeName == nodeName {
 			if newPvc.Status.Phase == v1.ClaimPending {
-				pvDir := storagePath + newPvc.ObjectMeta.Namespace + "_" + newPvc.ObjectMeta.Name + "-" + generateRandomSuffix(8)
-				if _, err := os.Stat(pvDir); os.IsNotExist(err) {
-					return true, pvDir
+				if pvDirName, ok := newPvc.ObjectMeta.Annotations[pvDirNameAnnotation]; ok {
+					pvDir := storagePath + pvDirName
+					if _, err := os.Stat(pvDir); os.IsNotExist(err) {
+						return true, pvDir
+					}
 				}
-			} else if newPvc.Status.Phase == v1.ClaimBound && newPvc.Spec.VolumeName != "" {
-				return true, ""
 			}
 		}
 	}
 	return false, ""
 }
 
+func shouldDeletePvcBeHandled(pvc v1.PersistentVolumeClaim, nodeName string) bool {
+	pvcNodeName, ok := pvc.ObjectMeta.Annotations[k8sclient.NodeName]
+	pvcIsLocal, _ := k8sclient.StorageClassIsNokiaLocal(*(pvc.Spec.StorageClassName))
+	if pvcIsLocal && ok && pvcNodeName == nodeName && pvc.Status.Phase == v1.ClaimBound && pvc.Spec.VolumeName != "" {
+		return true
+	}
+	return false
+}
+
 func (pvcHandler *PvcHandler) createPVStorage(pvc v1.PersistentVolumeClaim, pvDirPath string) {
 	var projID int = 1
-
 	pvcStorageReq, ok := pvc.Spec.Resources.Requests["storage"]
 	if !ok {
 		log.Println("PvcHandler ERROR: Storage request is empty!")
@@ -144,10 +145,10 @@ func (pvcHandler *PvcHandler) createPVStorage(pvc v1.PersistentVolumeClaim, pvDi
 		return
 	}
 	if string(projectsContent) != "" {
-		lines := strings.Split(strings.TrimRight(string(projectsContent),"\n"), "\n")
+		lines := strings.Split(strings.TrimRight(string(projectsContent), "\n"), "\n")
 		projid, err := strconv.Atoi(strings.Split(lines[len(lines)-1], ":")[0])
 		if err != nil {
-			log.Println("PvcHandler ERROR: Cannot convert project id from " + lines[len(lines)-2] + " because: " + err.Error())
+			log.Println("PvcHandler ERROR: Cannot convert project id from " + lines[len(lines)-1] + " because: " + err.Error())
 			return
 		}
 		projID = projid + 1
@@ -218,12 +219,52 @@ func (pvcHandler *PvcHandler) createPVStorage(pvc v1.PersistentVolumeClaim, pvDi
 		log.Println("PvcHandler ERROR: Cannot modify fstab file: " + fstabPath + " because: " + err.Error() + "\nCannot save mountpoint!")
 		return
 	}
-	pvName := generatePVName(filepath.Base(pvDirPath), pvcHandler.nodeName, *(pvc.Spec.StorageClassName))
+}
 
-	pvc.Spec.VolumeName = pvName
-	err = k8sclient.UpdatePvc(pvc, pvcHandler.k8sClient)
+// TODO: Relocate to pvHandler and processing it in multiple threads
+func deletePVStorage(pv v1.PersistentVolume, storagePath string) {
+	if pv.Spec.PersistentVolumeReclaimPolicy != v1.PersistentVolumeReclaimDelete {
+		return
+	}
+	localVolumePath := pv.Spec.Local.Path
+	// unmount pv directory
+	err := syscall.Unmount(localVolumePath, 0)
 	if err != nil {
-		log.Println("PvcHandler ERROR: Cannot update volumename in " + pvc.ObjectMeta.Name + " pvc, because: " + err.Error())
+		log.Println("PvcHandler ERROR: Cannot UNMOUNT directory (" + localVolumePath + "), because: " + err.Error())
+		return
+	}
+	// delete xfs_quota data
+	subcommand := fmt.Sprintf("limit -p bsoft=0 bhard=0 %s", filepath.Base(localVolumePath))
+	command := exec.Command("xfs_quota", "-x", "-c", subcommand, storagePath)
+	_, err = command.CombinedOutput()
+	if err != nil {
+		log.Println("PvcHandler ERROR: Cannot set xfs_quota project, because: " + err.Error())
+		return
+	}
+	subcommand = fmt.Sprintf("project -C %s", filepath.Base(localVolumePath))
+	command = exec.Command("xfs_quota", "-x", "-c", subcommand, storagePath)
+	_, err = command.CombinedOutput()
+	if err != nil {
+		log.Println("PvcHandler ERROR: Cannot set xfs_quota project, because: " + err.Error())
+		return
+	}
+	//remove data from projects file
+	err = removePvDataFromFile("/etc/projects", filepath.Base(localVolumePath))
+	if err != nil {
+		log.Println("PvcHandler ERROR: " + err.Error())
+		return
+	}
+	//remove data from projid file
+	err = removePvDataFromFile("/etc/projid", filepath.Base(localVolumePath))
+	if err != nil {
+		log.Println("PvcHandler ERROR: " + err.Error())
+		return
+	}
+	//remove data from fstab file
+	err = removePvDataFromFile(fstabPath, localVolumePath)
+	if err != nil {
+		log.Println("PvcHandler ERROR: " + err.Error())
+		return
 	}
 }
 
@@ -231,14 +272,14 @@ func removePvDataFromFile(filePath string, searchData string) error {
 	var removedList []string
 	fileContent, err := ioutil.ReadFile(filePath)
 	if err != nil {
-		return errors.New("Cannot read "+ filePath +" file: " + err.Error())
+		return errors.New("Cannot read " + filePath + " file: " + err.Error())
 	}
 	fileContentList := strings.Split(string(fileContent), "\n")
 	removeIdx := 0
 	for idx, data := range fileContentList {
-			if strings.Contains(data, searchData){
-				removeIdx = idx
-			}
+		if strings.Contains(data, searchData) {
+			removeIdx = idx
+		}
 	}
 	removedList = append(removedList, fileContentList[:removeIdx]...)
 	removedList = append(removedList, fileContentList[removeIdx+1:]...)
@@ -254,69 +295,6 @@ func removePvDataFromFile(filePath string, searchData string) error {
 	return nil
 }
 
-func deletePVStorage(pv v1.PersistentVolume, storagePath string){
-	if pv.Spec.PersistentVolumeReclaimPolicy != v1.PersistentVolumeReclaimDelete{
-		return
-	}
-	klog.Infof("DEBUG: Delete pvc: %s",pv.ObjectMeta.Name)
-	localVolumePath := pv.Spec.Local.Path
-	// unmount pv directory
-	err := syscall.Unmount(localVolumePath, 0)
-	if err != nil {
-		log.Println("PvcHandler ERROR: Cannot UNMOUNT directory (" + localVolumePath + "), because: " + err.Error())
-		return
-	}
-	klog.Infof("DEBUG: unmount successfull, pv:%s",pv.ObjectMeta.Name)
-	// delete xfs_quota data
-	subcommand := fmt.Sprintf("limit -p bsoft=0 bhard=0 %s", filepath.Base(localVolumePath))
-	command := exec.Command("xfs_quota", "-x", "-c", subcommand, storagePath)
-	_, err = command.CombinedOutput()
-	if err != nil {
-		log.Println("PvcHandler ERROR: Cannot set xfs_quota project, because: " + err.Error())
-		return
-	}
-	klog.Infof("DEBUG: set limit 0, pv:%s",pv.ObjectMeta.Name)
-	subcommand = fmt.Sprintf("project -C %s", filepath.Base(localVolumePath))
-	command = exec.Command("xfs_quota", "-x", "-c", subcommand, storagePath)
-	_, err = command.CombinedOutput()
-	if err != nil {
-		log.Println("PvcHandler ERROR: Cannot set xfs_quota project, because: " + err.Error())
-		return
-	}
-	klog.Infof("DEBUG: clear xfs_quota project, pv:%s",pv.ObjectMeta.Name)
-	//remove data from projects file
-	err = removePvDataFromFile("/etc/projects", filepath.Base(localVolumePath))
-	if err != nil {
-		log.Println("PvcHandler ERROR: " + err.Error())
-		return
-	}
-	klog.Infof("DEBUG: remove project from projects file, pv:%s",pv.ObjectMeta.Name)
-	//remove data from projid file
-	err = removePvDataFromFile("/etc/projid", filepath.Base(localVolumePath))
-	if err != nil {
-		log.Println("PvcHandler ERROR: " + err.Error())
-		return
-	}
-	klog.Infof("DEBUG: remove project from projid file, pv:%s",pv.ObjectMeta.Name)
-	//remove data from fstab file
-	err = removePvDataFromFile(fstabPath, localVolumePath)
-	if err != nil {
-		log.Println("PvcHandler ERROR: " + err.Error())
-		return
-	}
-	klog.Infof("DEBUG: remove mount from fstab, pv:%s",pv.ObjectMeta.Name)
-}
-
-func generateRandomSuffix(suffixlength int) string {
-	charPool := []byte("abcdefghijklmnopqrstuvwxyz1234567890")
-	rand.Seed(time.Now().Unix())
-	bytes := make([]byte, suffixlength)
-	for i := range bytes {
-		bytes[i] = charPool[rand.Intn(len(charPool))]
-	}
-	return string(bytes)
-}
-
 func isChangeEnoughToProceed(oldPvc v1.PersistentVolumeClaim, newPvc v1.PersistentVolumeClaim) bool {
 	old_nodename := oldPvc.ObjectMeta.Annotations[k8sclient.NodeName]
 	new_nodename := newPvc.ObjectMeta.Annotations[k8sclient.NodeName]
@@ -330,13 +308,4 @@ func isChangeEnoughToProceed(oldPvc v1.PersistentVolumeClaim, newPvc v1.Persiste
 		}
 	}
 	return false
-}
-
-func generatePVName(file, node, class string) string {
-	h := fnv.New32a()
-	h.Write([]byte(file))
-	h.Write([]byte(node))
-	h.Write([]byte(class))
-	// This is the FNV-1a 32-bit hash
-	return fmt.Sprintf("local-pv-%x", h.Sum32())
 }
