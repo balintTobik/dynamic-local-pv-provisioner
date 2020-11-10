@@ -3,6 +3,7 @@ package k8sclient
 import (
 	"context"
 	"errors"
+	"log"
 
 	"github.com/sbabiv/roundrobin"
 	v1 "k8s.io/api/core/v1"
@@ -62,8 +63,16 @@ func GetNodeByLabel(label string, selectorMethod string, rr *roundrobin.Balancer
 		return nodeList.Items[0], nil
 	default:
 		if selectorMethod == RR {
-			nodeId, _ := rr.Pick()
-			returnNode = nodeList.Items[nodeId.(int)%len(nodeList.Items)]
+			for range nodeList.Items {
+				nodeId, _ := rr.Pick()
+				returnNode = nodeList.Items[nodeId.(int)%len(nodeList.Items)]
+				log.Println("LOFASZ: choosed node: " + returnNode.ObjectMeta.Name)
+				_, ok := returnNode.Status.Capacity[LvCapacity]
+				if ok {
+					log.Println("LOFASZ: found")
+					break
+				}
+			}
 		} else if selectorMethod == Cap {
 			for _, node := range nodeList.Items {
 				nodeCapacity, ok := node.Status.Capacity[LvCapacity]
