@@ -188,18 +188,22 @@ func (pvcHandler *PvcHandler) createPVStorage(pvc v1.PersistentVolumeClaim, pvDi
 	// set xfs_quota limit
 	subcommand := fmt.Sprintf("project -s %s", projName)
 	command := exec.Command("xfs_quota", "-x", "-c", subcommand, pvcHandler.storagePath)
-	_, err = command.CombinedOutput()
+	output, err := command.CombinedOutput()
 	if err != nil {
 		log.Println("PvcHandler ERROR: Cannot set xfs_quota project, because: " + err.Error())
 		return
 	}
+	log.Println("DEBUG: " + command.String())
+	log.Println("DEBUG: " + string(output))
 	subcommand = fmt.Sprintf("limit -p bhard=%s %s", storageRequest, projName)
 	command = exec.Command("xfs_quota", "-x", "-c", subcommand, pvcHandler.storagePath)
-	_, err = command.CombinedOutput()
+	output, err = command.CombinedOutput()
 	if err != nil {
 		log.Println("PvcHandler ERROR: Cannot set xfs_quota limit, because: " + err.Error())
 		return
 	}
+	log.Println("DEBUG: " + command.String())
+	log.Println("DEBUG: " + string(output))
 	// Bind mounting
 	err = syscall.Mount(pvDirPath, pvDirPath, "none", syscall.MS_BIND, "")
 	if err != nil {
