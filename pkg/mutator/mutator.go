@@ -55,17 +55,17 @@ func toAdmissionResponse(err error) *v1beta1.AdmissionResponse {
 }
 
 type Mutator struct {
-	rr           *roundrobin.Balancer
-	selectMethod string
+	rr        *roundrobin.Balancer
+	nodeLabel string
 }
 
-func NewMutator(method string) (*Mutator, error) {
+func NewMutator(method string, nodeLabel string) (*Mutator, error) {
 	var nodeList []string
 	err := parseDefaultNodeSelector()
 	if err != nil {
 		log.Println("WARNING: Cannot parse default node selector, because: " + err.Error() + ". Continue without it...")
 	}
-	mutator := Mutator{rr: nil}
+	mutator := Mutator{rr: nil, nodeLabel: nodeLabel}
 	nodeSelectMethod = method
 	if nodeSelectMethod == k8sclient.RR {
 		nodes, err := k8sclient.GetAllNodes()
@@ -118,7 +118,7 @@ func (mutator *Mutator) ServeMutatePvc(w http.ResponseWriter, r *http.Request) {
 		log.Println("ERROR: Decode Pvc body is failed, because " + err.Error())
 		responseAdmissionReview.Response = toAdmissionResponse(err)
 	} else {
-		responseAdmissionReview.Response = mutatePvcs(requestedAdmissionReview, mutator.rr)
+		responseAdmissionReview.Response = mutatePvcs(requestedAdmissionReview, mutator.rr, mutator.nodeLabel)
 	}
 	responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
 
@@ -133,7 +133,7 @@ func (mutator *Mutator) ServeMutatePvc(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func mutatePvcs(ar v1beta1.AdmissionReview, rr *roundrobin.Balancer) *v1beta1.AdmissionResponse {
+func mutatePvcs(ar v1beta1.AdmissionReview, rr *roundrobin.Balancer, nodeLabel string) *v1beta1.AdmissionResponse {
 	var (
 		patchList []patch
 		err       error
@@ -157,7 +157,7 @@ func mutatePvcs(ar v1beta1.AdmissionReview, rr *roundrobin.Balancer) *v1beta1.Ad
 	}
 	nodeAnnotation, nodeAnnotationExists := pvc.ObjectMeta.Annotations[k8sclient.NodeName]
 	if !nodeAnnotationExists {
-		patchList, nodeAnnotation, err = setNodeSelector(pvc, patchList, rr)
+		patchList, nodeAnnotation, err = setNodeSelector(pvc, patchList, rr, nodeLabel)
 		if err != nil {
 			return toAdmissionResponse(err)
 		}
@@ -179,7 +179,7 @@ func mutatePvcs(ar v1beta1.AdmissionReview, rr *roundrobin.Balancer) *v1beta1.Ad
 	return &reviewResponse
 }
 
-func setNodeSelector(pvc corev1.PersistentVolumeClaim, patchList []patch, rr *roundrobin.Balancer) ([]patch, string, error) {
+func setNodeSelector(pvc corev1.PersistentVolumeClaim, patchList []patch, rr *roundrobin.Balancer, nodeLabel string) ([]patch, string, error) {
 	var patchItem patch
 	nodeSelectorMap := make(map[string]string)
 	if nodeSel, ok := pvc.ObjectMeta.Annotations[nodeSelector]; ok {
@@ -191,6 +191,9 @@ func setNodeSelector(pvc corev1.PersistentVolumeClaim, patchList []patch, rr *ro
 		}
 	}
 	s := []string{}
+	if nodeLabel != "" {
+		s = append(s, nodeLabel)
+	}
 	if len(nodeSelectorMap) > 0 {
 		for key, value := range nodeSelectorMap {
 			s = append(s, key+"="+value)

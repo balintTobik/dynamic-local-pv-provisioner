@@ -1,0 +1,33 @@
+---
+apiVersion: admissionregistration.k8s.io/v1beta1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: dynamic-local-pv-provisoner-config
+  namespace: kube-system
+webhooks:
+  - name: dynamic-local-pv-mutator.nokia.k8s.io
+    admissionReviewVersions:
+    - v1beta1
+    clientConfig:
+      service:
+        name: dynamic-local-pv-provisoner-svc
+        namespace: kube-system
+        path: "/mutating-pvc"
+      caBundle: "${CA_BUNDLE}"
+    failurePolicy: Fail
+    matchPolicy: Exact
+    namespaceSelector: {}
+    objectSelector: {}
+    reinvocationPolicy: Never
+    rules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      resources:
+      - persistentvolumeclaims
+      scope: '*'
+    sideEffects: Unknown
+    timeoutSeconds: 30

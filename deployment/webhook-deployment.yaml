@@ -1,0 +1,45 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamic-local-pv-provisioner
+  namespace: kube-system
+  labels:
+      app: dynamic-local-pv-mutator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamic-local-pv-mutator
+  template:
+    metadata:
+      labels:
+        app: dynamic-local-pv-mutator
+    spec:
+      serviceAccountName: dynamic-pv
+      nodeSelector: node-role.kubernetes.io/master: ""
+      containers:
+      - name: dynamic-local-pv-provisioner
+        image: pv-test:latest
+        imagePullPolicy: IfNotPresent
+        command: [ "/webhook", "-tls-cert-bundle=/etc/webhook/certs/cert.pem", "-tls-private-key-file=/etc/webhook/certs/key.pem" ]
+        volumeMounts:
+          - name: time-mount
+            mountPath: /etc/localtime
+            readOnly: true
+          - name: webhook-certs
+            mountPath: /etc/webhook/certs
+            readOnly: true
+          - mountPath: /etc/config
+            name: dynamic-provisioner-config
+            readOnly: true
+      volumes:
+        - name: time-mount
+          hostPath:
+            path: /etc/localtime
+        - name: webhook-certs
+          secret:
+            secretName: dynamic-local-pv-webhook-certs
+        - name: dynamic-provisioner-config
+          configMap:
+            name: dynamic-provisioner-config

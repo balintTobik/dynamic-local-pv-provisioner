@@ -16,12 +16,13 @@ var nodeSelectMethod string
 func main() {
 	cert := flag.String("tls-cert-bundle", "", "file containing the x509 Certificate for HTTPS. (CA cert, if any, concatenated after server cert).")
 	key := flag.String("tls-private-key-file", "", "file containing the x509 private key matching --tls-cert-bundle.")
+	nodeLabel := flag.String("node-label-for-dynamic", "", " node label for dynamic local pv provisoner. Optional parameter, only required when local-storage not configured on all nodes.")
 	flag.StringVar(&nodeSelectMethod, "node-selector-method", "round robin", "node selector method. Acceptable values: \"round robin\" or \"capacity\", default is \"round robin\"")
 	flag.Parse()
 	if nodeSelectMethod != k8sclient.RR && nodeSelectMethod != k8sclient.Cap {
 		log.Fatalln("ERROR: Unacceptable node-selector-method! Acceptable values: \"round robin\" or \"capacity\", default is \"round robin\"")
 	}
-	mutate, err := mutator.NewMutator(nodeSelectMethod)
+	mutate, err := mutator.NewMutator(nodeSelectMethod, *nodeLabel)
 	if cert == nil || key == nil {
 		log.Fatalln("ERROR: Configuring TLS is mandatory, --tls-cert-bundle and --tls-private-key-file cannot be empty!")
 		return
