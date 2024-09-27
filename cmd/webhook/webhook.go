@@ -22,11 +22,15 @@ func main() {
 	if nodeSelectMethod != k8sclient.RR && nodeSelectMethod != k8sclient.Cap {
 		log.Fatalln("ERROR: Unacceptable node-selector-method! Acceptable values: \"round robin\" or \"capacity\", default is \"round robin\"")
 	}
-	mutate, err := mutator.NewMutator(nodeSelectMethod, *nodeLabel)
 	if cert == nil || key == nil {
 		log.Fatalln("ERROR: Configuring TLS is mandatory, --tls-cert-bundle and --tls-private-key-file cannot be empty!")
 		return
 	}
+	mutate, err := mutator.NewMutator(nodeSelectMethod, *nodeLabel)
+	if err != nil {
+		log.Fatalln("ERROR: " + err.Error())
+	}
+
 	tlsConf, err := tls.LoadX509KeyPair(*cert, *key)
 	if err != nil {
 		log.Println("ERROR: TLS configuration could not be initialized, because:" + err.Error())

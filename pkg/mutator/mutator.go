@@ -97,6 +97,7 @@ func parseDefaultNodeSelector() error {
 }
 
 func (mutator *Mutator) ServeMutatePvc(w http.ResponseWriter, r *http.Request) {
+	log.Println("INFO: Start ServeMutatePvc")
 	var body []byte
 	if r.Body != nil {
 		if data, err := ioutil.ReadAll(r.Body); err == nil {
@@ -106,6 +107,7 @@ func (mutator *Mutator) ServeMutatePvc(w http.ResponseWriter, r *http.Request) {
 	// verify the content type is accurate
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
+		log.Printf("DEBUG: Request: %+v \n", r)
 		log.Printf("ERROR: contentType=%s, expect application/json\n", contentType)
 		return
 	}
@@ -118,6 +120,7 @@ func (mutator *Mutator) ServeMutatePvc(w http.ResponseWriter, r *http.Request) {
 		log.Println("ERROR: Decode Pvc body is failed, because " + err.Error())
 		responseAdmissionReview.Response = toAdmissionResponse(err)
 	} else {
+		log.Println("INFO: call mutatePvcs...")
 		responseAdmissionReview.Response = mutatePvcs(requestedAdmissionReview, mutator.rr, mutator.nodeLabel)
 	}
 	responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
